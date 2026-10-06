@@ -1,15 +1,19 @@
 import { NextResponse } from "next/server";
 import { isRateLimited, MemoryCache } from "@/lib/cache";
-import { coinGeckoBaseUrl, coinGeckoHeaders } from "@/lib/coingecko";
-import { fetchWithRetry, UpstreamError } from "@/lib/fetch-with-retry";
+import { coinGeckoBaseUrl, coinGeckoHeaders, publicApiHeaders } from "@/lib/coingecko";
+import { fetchWithRetry, readUpstreamJson, UpstreamError } from "@/lib/fetch-with-retry";
 import { normalizeSearchQuery } from "@/lib/search";
-import { binanceTickersSchema, pairMatchesQuery } from "@/lib/schemas/binance";
+import { BINANCE_TICKER_URLS, binanceTickersSchema, pairMatchesQuery } from "@/lib/schemas/binance";
 import { rawMarketsResponseSchema } from "@/lib/schemas/markets";
 import { rawSearchResponseSchema } from "@/lib/schemas/search";
 import { fromBinanceTicker } from "@/lib/transformers/binance";
 import { toMarketAssets } from "@/lib/transformers/markets";
 import { fromSearchCoin } from "@/lib/transformers/search";
 import type { ApiErrorBody, MarketsPayload } from "@/types/markets";
+
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+export const maxDuration = 20;
 
 type SearchPayload = MarketsPayload & { query: string };
 
@@ -111,7 +115,7 @@ async function searchCoinGecko(query: string): Promise<SearchPayload> {
   searchUrl.searchParams.set("query", query);
 
   const searchResponse = await fetchWithRetry(searchUrl.toString(), { headers }, { attempts: 3, timeoutMs: 8000 });
-  const searchJson: unknown = await searchResponse.json();
+  const searchJson = await readUpstreamJson(searchResponse);
   const parsedSearch = rawSearchResponseSchema.safeParse(searchJson);
 
   if (!parsedSearch.success) {
@@ -133,7 +137,7 @@ async function searchCoinGecko(query: string): Promise<SearchPayload> {
 
   try {
     const marketsResponse = await fetchWithRetry(marketsUrl.toString(), { headers }, { attempts: 3, timeoutMs: 8000 });
-    const marketsJson: unknown = await marketsResponse.json();
+    const marketsJson = await readUpstreamJson(marketsResponse);
     const parsedMarkets = rawMarketsResponseSchema.safeParse(marketsJson);
 
     if (parsedMarkets.success && parsedMarkets.data.length > 0) {
@@ -149,23 +153,35 @@ async function searchCoinGecko(query: string): Promise<SearchPayload> {
 }
 
 async function searchBinance(query: string): Promise<SearchPayload> {
-  const response = await fetchWithRetry(
-    "https://api.binance.com/api/v3/ticker/24hr",
-    { headers: { Accept: "application/json" } },
-    { attempts: 3, timeoutMs: 8000 },
-  );
-  const json: unknown = await response.json();
-  const parsed = binanceTickersSchema.safeParse(json);
+  let lastError: unknown;
 
-  if (!parsed.success) {
-    throw new UpstreamError("Fallback search payload failed validation.", 502, "VALIDATION_ERROR");
+  for (const url of BINANCE_TICKER_URLS) {
+    try {
+      const response = await fetchWithRetry(
+        url,
+        { headers: publicApiHeaders() },
+        { attempts: 2, timeoutMs: 8000 },
+      );
+      const json = await readUpstreamJson(response);
+      const parsed = binanceTickersSchema.safeParse(json);
+
+      if (!parsed.success) {
+        throw new UpstreamError("Fallback search payload failed validation.", 502, "VALIDATION_ERROR");
+      }
+
+      const fetchedAt = new Date().toISOString();
+      const assets = parsed.data
+        .filter((ticker) => pairMatchesQuery(ticker.symbol, query))
+        .slice(0, 12)
+        .map((ticker) => fromBinanceTicker(ticker, fetchedAt));
+
+      return { assets, fetchedAt, source: "live", count: assets.length, query };
+    } catch (error) {
+      lastError = error;
+    }
   }
 
-  const fetchedAt = new Date().toISOString();
-  const assets = parsed.data
-    .filter((ticker) => pairMatchesQuery(ticker.symbol, query))
-    .slice(0, 12)
-    .map((ticker) => fromBinanceTicker(ticker, fetchedAt));
-
-  return { assets, fetchedAt, source: "live", count: assets.length, query };
+  throw lastError instanceof Error
+    ? lastError
+    : new UpstreamError("Fallback search is unavailable.", 502, "UPSTREAM_ERROR");
 }

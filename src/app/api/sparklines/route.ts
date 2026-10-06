@@ -9,6 +9,10 @@ import {
 import { UpstreamError } from "@/lib/fetch-with-retry";
 import type { ApiErrorBody, SparklinesPayload } from "@/types/markets";
 
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+export const maxDuration = 20;
+
 function errorResponse(status: number, body: ApiErrorBody): NextResponse<ApiErrorBody> {
   return NextResponse.json(body, {
     status,

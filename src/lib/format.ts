@@ -1,13 +1,24 @@
-import DOMPurify from "isomorphic-dompurify";
-
 const FALLBACK = "N/A";
+
+function stripMarkup(value: string): string {
+  return value
+    .replace(/<[^>]*>/g, "")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#0*39;/g, "'")
+    .replace(/[\u0000-\u001F\u007F]/g, "")
+    .trim();
+}
 
 export function sanitizeText(value: string | null | undefined, fallback = FALLBACK): string {
   if (!value) {
     return fallback;
   }
 
-  const cleaned = DOMPurify.sanitize(value, { ALLOWED_TAGS: [], ALLOWED_ATTR: [] }).trim();
+  const cleaned = stripMarkup(value);
   return cleaned.length > 0 ? cleaned : fallback;
 }
 
@@ -16,7 +27,7 @@ export function sanitizeUrl(value: string | null | undefined): string {
     return "";
   }
 
-  const cleaned = DOMPurify.sanitize(value, { ALLOWED_TAGS: [], ALLOWED_ATTR: [] }).trim();
+  const cleaned = stripMarkup(value);
   try {
     const parsed = new URL(cleaned);
     if (parsed.protocol === "https:" || parsed.protocol === "http:") {

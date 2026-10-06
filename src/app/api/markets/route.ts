@@ -10,6 +10,10 @@ import {
 import { UpstreamError } from "@/lib/fetch-with-retry";
 import type { ApiErrorBody, MarketsPayload } from "@/types/markets";
 
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+export const maxDuration = 20;
+
 function errorResponse(status: number, body: ApiErrorBody): NextResponse<ApiErrorBody> {
   return NextResponse.json(body, {
     status,
@@ -75,7 +79,7 @@ export async function GET(): Promise<NextResponse<MarketsPayload | ApiErrorBody>
     return errorResponse(500, {
       error: {
         code: "UNKNOWN",
-        message: "An unexpected error occurred while fetching market data.",
+        message: error instanceof Error ? error.message : "An unexpected error occurred while fetching market data.",
       },
     });
   }

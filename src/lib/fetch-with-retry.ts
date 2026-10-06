@@ -54,7 +54,7 @@ export async function fetchWithRetry(
       const response = await fetch(url, {
         ...init,
         signal: controller.signal,
-        cache: init.cache ?? (init.next ? undefined : "no-store"),
+        cache: "no-store",
       });
 
       if (response.ok) {
@@ -98,4 +98,18 @@ export async function fetchWithRetry(
   }
 
   throw lastError;
+}
+
+export async function readUpstreamJson(response: Response): Promise<unknown> {
+  const text = await response.text();
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.startsWith("<") || trimmed.toLowerCase().includes("<html")) {
+    throw new UpstreamError("Upstream returned HTML instead of JSON.", response.status || 502, "UPSTREAM_ERROR");
+  }
+
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    throw new UpstreamError("Upstream payload was not valid JSON.", 502, "VALIDATION_ERROR");
+  }
 }

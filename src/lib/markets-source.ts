@@ -1,12 +1,14 @@
 import { MemoryCache } from "@/lib/cache";
-import { coinGeckoBaseUrl, coinGeckoHeaders } from "@/lib/coingecko";
-import { fetchWithRetry, UpstreamError } from "@/lib/fetch-with-retry";
-import { binanceTickersSchema, isTrackedPair } from "@/lib/schemas/binance";
+import { coinGeckoBaseUrl, coinGeckoHeaders, publicApiHeaders } from "@/lib/coingecko";
+import { fetchWithRetry, readUpstreamJson, UpstreamError } from "@/lib/fetch-with-retry";
+import { formatLocalTimestamp, formatUsd, sanitizeText, toNumber } from "@/lib/format";
+import { BINANCE_TICKER_URLS, binanceTickersSchema, isTrackedPair } from "@/lib/schemas/binance";
 import { rawMarketsResponseSchema } from "@/lib/schemas/markets";
 import { buildSparklinePath, downsampleSparkline } from "@/lib/sparkline";
 import { fromBinanceTicker } from "@/lib/transformers/binance";
 import { toMarketAssets } from "@/lib/transformers/markets";
 import type { MarketsPayload, SparklinesPayload } from "@/types/markets";
+import { z } from "zod";
 
 const MARKETS_KEY = "usd-markets";
 const SPARKLINES_KEY = "usd-sparklines";
@@ -58,11 +60,10 @@ async function fetchCoinGeckoMarkets(sparkline: boolean) {
     marketsEndpoint(sparkline),
     {
       headers: coinGeckoHeaders(),
-      next: { revalidate: sparkline ? 45 : 20 },
     },
-    { attempts: 2, timeoutMs: sparkline ? 7000 : 4500 },
+    { attempts: 2, timeoutMs: sparkline ? 8000 : 8000 },
   );
-  const json: unknown = await response.json();
+  const json = await readUpstreamJson(response);
   const parsed = rawMarketsResponseSchema.safeParse(json);
 
   if (!parsed.success) {
@@ -72,13 +73,13 @@ async function fetchCoinGeckoMarkets(sparkline: boolean) {
   return parsed.data;
 }
 
-async function fetchBinanceFallback(): Promise<MarketsPayload> {
+async function fetchBinanceFrom(url: string): Promise<MarketsPayload> {
   const response = await fetchWithRetry(
-    "https://api.binance.com/api/v3/ticker/24hr",
-    { headers: { Accept: "application/json" }, next: { revalidate: 20 } },
-    { attempts: 2, timeoutMs: 5000 },
+    url,
+    { headers: publicApiHeaders() },
+    { attempts: 2, timeoutMs: 8000 },
   );
-  const json: unknown = await response.json();
+  const json = await readUpstreamJson(response);
   const parsed = binanceTickersSchema.safeParse(json);
 
   if (!parsed.success) {
@@ -91,12 +92,110 @@ async function fetchBinanceFallback(): Promise<MarketsPayload> {
     .map((ticker) => fromBinanceTicker(ticker, fetchedAt))
     .sort((left, right) => left.rank - right.rank);
 
+  if (assets.length === 0) {
+    throw new UpstreamError("Fallback payload did not include tracked markets.", 502, "VALIDATION_ERROR");
+  }
+
   return {
     assets,
     fetchedAt,
     source: "live",
     count: assets.length,
   };
+}
+
+const coinloreTickerSchema = z.object({
+  id: z.string(),
+  symbol: z.string(),
+  name: z.string(),
+  rank: z.union([z.number(), z.string()]),
+  price_usd: z.union([z.number(), z.string()]),
+  market_cap_usd: z.union([z.number(), z.string()]).optional(),
+  volume24: z.union([z.number(), z.string()]).optional(),
+  percent_change_1h: z.union([z.number(), z.string()]).optional(),
+  percent_change_24h: z.union([z.number(), z.string()]).optional(),
+  percent_change_7d: z.union([z.number(), z.string()]).optional(),
+});
+
+const coinloreResponseSchema = z.object({
+  data: z.array(coinloreTickerSchema),
+});
+
+async function fetchCoinloreFallback(): Promise<MarketsPayload> {
+  const response = await fetchWithRetry(
+    "https://api.coinlore.net/api/tickers/?start=0&limit=48",
+    { headers: publicApiHeaders() },
+    { attempts: 2, timeoutMs: 8000 },
+  );
+  const json = await readUpstreamJson(response);
+  const parsed = coinloreResponseSchema.safeParse(json);
+
+  if (!parsed.success) {
+    throw new UpstreamError("Secondary fallback payload failed validation.", 502, "VALIDATION_ERROR");
+  }
+
+  const fetchedAt = new Date().toISOString();
+  const assets = parsed.data.data.map((ticker) => {
+    const price = toNumber(Number.parseFloat(String(ticker.price_usd)));
+    const marketCap = toNumber(Number.parseFloat(String(ticker.market_cap_usd ?? 0)));
+    const volume = toNumber(Number.parseFloat(String(ticker.volume24 ?? 0)));
+    const change1h = toNumber(Number.parseFloat(String(ticker.percent_change_1h ?? 0)));
+    const change24h = toNumber(Number.parseFloat(String(ticker.percent_change_24h ?? 0)));
+    const change7d = toNumber(Number.parseFloat(String(ticker.percent_change_7d ?? 0)));
+    const rank = Math.max(0, Math.round(toNumber(Number.parseFloat(String(ticker.rank)))));
+
+    return {
+      id: sanitizeText(ticker.id, "unknown"),
+      symbol: sanitizeText(ticker.symbol, "n/a").toUpperCase(),
+      name: sanitizeText(ticker.name),
+      imageUrl: "",
+      rank,
+      priceUsd: price,
+      priceFormatted: formatUsd(price),
+      marketCap,
+      marketCapFormatted: formatUsd(marketCap),
+      volume,
+      volumeFormatted: formatUsd(volume),
+      high24hFormatted: "N/A",
+      low24hFormatted: "N/A",
+      change1h,
+      change24h,
+      change7d,
+      sparkline: [price],
+      sparklinePath: buildSparklinePath([price]),
+      lastUpdatedIso: fetchedAt,
+      lastUpdatedLabel: formatLocalTimestamp(fetchedAt),
+    };
+  });
+
+  if (assets.length === 0) {
+    throw new UpstreamError("Secondary fallback returned no markets.", 502, "VALIDATION_ERROR");
+  }
+
+  return {
+    assets,
+    fetchedAt,
+    source: "live",
+    count: assets.length,
+  };
+}
+
+async function fetchPublicFallback(): Promise<MarketsPayload> {
+  let lastError: unknown;
+
+  for (const url of BINANCE_TICKER_URLS) {
+    try {
+      return await fetchBinanceFrom(url);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  try {
+    return await fetchCoinloreFallback();
+  } catch (error) {
+    throw lastError instanceof Error ? lastError : error;
+  }
 }
 
 export async function loadMarketsPayload(): Promise<MarketsPayload> {
@@ -127,7 +226,7 @@ export async function loadMarketsPayload(): Promise<MarketsPayload> {
       }
 
       try {
-        const fallback = await fetchBinanceFallback();
+        const fallback = await fetchPublicFallback();
         marketsCache.set(MARKETS_KEY, fallback);
         return fallback;
       } catch {
