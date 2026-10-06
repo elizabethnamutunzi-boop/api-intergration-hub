@@ -17,9 +17,14 @@ async function fetchMarkets(): Promise<MarketsPayload> {
 
   let json: unknown;
   try {
-    json = await response.json();
+    const text = await response.text();
+    json = text ? JSON.parse(text) : null;
   } catch {
-    throw new MarketsRequestError("The API returned an unreadable response.", "UPSTREAM_ERROR", response.status);
+    throw new MarketsRequestError(
+      "The market API failed before it could send data. Retry in a moment.",
+      "UPSTREAM_ERROR",
+      response.status || 502,
+    );
   }
 
   if (!response.ok) {

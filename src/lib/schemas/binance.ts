@@ -12,12 +12,18 @@ export const binanceTickerSchema = z.object({
 export const binanceTickersSchema = z.array(binanceTickerSchema);
 
 export const BINANCE_TICKER_URLS = [
-  "https://api.binance.com/api/v3/ticker/24hr",
-  "https://data-api.binance.vision/api/v3/ticker/24hr",
   "https://api.binance.us/api/v3/ticker/24hr",
+  "https://data-api.binance.vision/api/v3/ticker/24hr",
+  "https://api.binance.com/api/v3/ticker/24hr",
 ] as const;
 
-const TOP_PAIRS = [
+export function binanceTickersUrl(base: string): string {
+  const url = new URL(base);
+  url.searchParams.set("symbols", JSON.stringify(TOP_PAIRS));
+  return url.toString();
+}
+
+export const TOP_PAIRS = [
   "BTCUSDT",
   "ETHUSDT",
   "BNBUSDT",

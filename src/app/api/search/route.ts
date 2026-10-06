@@ -13,7 +13,7 @@ import type { ApiErrorBody, MarketsPayload } from "@/types/markets";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
-export const maxDuration = 20;
+export const maxDuration = 10;
 
 type SearchPayload = MarketsPayload & { query: string };
 

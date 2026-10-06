@@ -12,7 +12,7 @@ import type { ApiErrorBody, MarketsPayload } from "@/types/markets";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
-export const maxDuration = 20;
+export const maxDuration = 10;
 
 function errorResponse(status: number, body: ApiErrorBody): NextResponse<ApiErrorBody> {
   return NextResponse.json(body, {
@@ -31,31 +31,34 @@ function cachedResponse(payload: MarketsPayload): NextResponse<MarketsPayload> {
 }
 
 export async function GET(): Promise<NextResponse<MarketsPayload | ApiErrorBody>> {
-  const fresh = getFreshMarkets();
-  if (fresh) {
-    warmSparklines();
-    return cachedResponse(fresh);
-  }
-
-  const stale = getStaleMarkets();
-  if (stale) {
-    void loadMarketsPayload().catch(() => undefined);
-    warmSparklines();
-    return cachedResponse(stale);
-  }
-
-  if (isRateLimited()) {
-    return errorResponse(429, {
-      error: {
-        code: "RATE_LIMITED",
-        message: "Too many requests. Please wait a moment and try again.",
-      },
-    });
-  }
-
   try {
+    const fresh = getFreshMarkets();
+    if (fresh) {
+      if (fresh.assets.some((asset) => asset.imageUrl)) {
+        warmSparklines();
+      }
+      return cachedResponse(fresh);
+    }
+
+    const stale = getStaleMarkets();
+    if (stale) {
+      void loadMarketsPayload().catch(() => undefined);
+      return cachedResponse(stale);
+    }
+
+    if (isRateLimited()) {
+      return errorResponse(429, {
+        error: {
+          code: "RATE_LIMITED",
+          message: "Too many requests. Please wait a moment and try again.",
+        },
+      });
+    }
+
     const payload = await loadMarketsPayload();
-    warmSparklines();
+    if (payload.assets.some((asset) => asset.imageUrl)) {
+      warmSparklines();
+    }
     return NextResponse.json(payload, { headers: marketsCacheHeaders });
   } catch (error) {
     if (error instanceof UpstreamError) {

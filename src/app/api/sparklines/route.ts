@@ -11,7 +11,7 @@ import type { ApiErrorBody, SparklinesPayload } from "@/types/markets";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
-export const maxDuration = 20;
+export const maxDuration = 10;
 
 function errorResponse(status: number, body: ApiErrorBody): NextResponse<ApiErrorBody> {
   return NextResponse.json(body, {

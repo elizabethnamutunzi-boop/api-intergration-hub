@@ -2,7 +2,7 @@ import { MemoryCache } from "@/lib/cache";
 import { coinGeckoBaseUrl, coinGeckoHeaders, publicApiHeaders } from "@/lib/coingecko";
 import { fetchWithRetry, readUpstreamJson, UpstreamError } from "@/lib/fetch-with-retry";
 import { formatLocalTimestamp, formatUsd, sanitizeText, toNumber } from "@/lib/format";
-import { BINANCE_TICKER_URLS, binanceTickersSchema, isTrackedPair } from "@/lib/schemas/binance";
+import { binanceTickersSchema, binanceTickersUrl, isTrackedPair } from "@/lib/schemas/binance";
 import { rawMarketsResponseSchema } from "@/lib/schemas/markets";
 import { buildSparklinePath, downsampleSparkline } from "@/lib/sparkline";
 import { fromBinanceTicker } from "@/lib/transformers/binance";
@@ -61,7 +61,7 @@ async function fetchCoinGeckoMarkets(sparkline: boolean) {
     {
       headers: coinGeckoHeaders(),
     },
-    { attempts: 2, timeoutMs: sparkline ? 8000 : 8000 },
+    { attempts: 1, timeoutMs: 3500 },
   );
   const json = await readUpstreamJson(response);
   const parsed = rawMarketsResponseSchema.safeParse(json);
@@ -77,7 +77,7 @@ async function fetchBinanceFrom(url: string): Promise<MarketsPayload> {
   const response = await fetchWithRetry(
     url,
     { headers: publicApiHeaders() },
-    { attempts: 2, timeoutMs: 8000 },
+    { attempts: 1, timeoutMs: 3500 },
   );
   const json = await readUpstreamJson(response);
   const parsed = binanceTickersSchema.safeParse(json);
@@ -125,7 +125,7 @@ async function fetchCoinloreFallback(): Promise<MarketsPayload> {
   const response = await fetchWithRetry(
     "https://api.coinlore.net/api/tickers/?start=0&limit=48",
     { headers: publicApiHeaders() },
-    { attempts: 2, timeoutMs: 8000 },
+    { attempts: 1, timeoutMs: 3500 },
   );
   const json = await readUpstreamJson(response);
   const parsed = coinloreResponseSchema.safeParse(json);
@@ -180,21 +180,31 @@ async function fetchCoinloreFallback(): Promise<MarketsPayload> {
   };
 }
 
-async function fetchPublicFallback(): Promise<MarketsPayload> {
-  let lastError: unknown;
+async function fetchCoinGeckoPayload(): Promise<MarketsPayload> {
+  const raw = await fetchCoinGeckoMarkets(false);
+  return {
+    assets: toMarketAssets(raw),
+    fetchedAt: new Date().toISOString(),
+    source: "live",
+    count: raw.length,
+  };
+}
 
-  for (const url of BINANCE_TICKER_URLS) {
-    try {
-      return await fetchBinanceFrom(url);
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
+async function fetchLiveMarkets(): Promise<MarketsPayload> {
   try {
-    return await fetchCoinloreFallback();
+    return await Promise.any([
+      fetchCoinloreFallback(),
+      fetchBinanceFrom(binanceTickersUrl("https://api.binance.us/api/v3/ticker/24hr")),
+      fetchBinanceFrom(binanceTickersUrl("https://data-api.binance.vision/api/v3/ticker/24hr")),
+      fetchCoinGeckoPayload(),
+    ]);
   } catch (error) {
-    throw lastError instanceof Error ? lastError : error;
+    if (error instanceof AggregateError) {
+      throw error.errors[0] instanceof Error
+        ? error.errors[0]
+        : new UpstreamError("All market sources failed.", 502, "UPSTREAM_ERROR");
+    }
+    throw error;
   }
 }
 
@@ -210,13 +220,7 @@ export async function loadMarketsPayload(): Promise<MarketsPayload> {
 
   inflight.markets = (async () => {
     try {
-      const raw = await fetchCoinGeckoMarkets(false);
-      const payload: MarketsPayload = {
-        assets: toMarketAssets(raw),
-        fetchedAt: new Date().toISOString(),
-        source: "live",
-        count: raw.length,
-      };
+      const payload = await fetchLiveMarkets();
       marketsCache.set(MARKETS_KEY, payload);
       return payload;
     } catch (error) {
@@ -224,14 +228,7 @@ export async function loadMarketsPayload(): Promise<MarketsPayload> {
       if (stale) {
         return { ...stale, source: "cache" };
       }
-
-      try {
-        const fallback = await fetchPublicFallback();
-        marketsCache.set(MARKETS_KEY, fallback);
-        return fallback;
-      } catch {
-        throw error;
-      }
+      throw error;
     } finally {
       inflight.markets = null;
     }

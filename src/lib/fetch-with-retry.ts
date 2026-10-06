@@ -81,7 +81,10 @@ export async function fetchWithRetry(
         if (error.code !== "RATE_LIMITED" && error.status < 500) {
           throw error;
         }
-      } else if (error instanceof DOMException && error.name === "AbortError") {
+      } else if (
+        (error instanceof DOMException && error.name === "AbortError") ||
+        (error instanceof Error && error.name === "AbortError")
+      ) {
         lastError = new UpstreamError("The upstream request timed out.", 504, "TIMEOUT");
       } else {
         lastError = new UpstreamError("Unable to reach the upstream API.", 502, "UNKNOWN");
